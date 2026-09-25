@@ -46,6 +46,16 @@ def on_ui_settings():
             section=section,
         ).info("Controls whether a new snippet should try to use the latest generated image as its thumbnail.").needs_reload_ui(),
     )
+    shared.opts.add_option(
+        "forge_prompt_snippets_groups_default_state",
+        shared.OptionInfo(
+            "Open",
+            "Default state for new snippet groups",
+            gr.Radio,
+            {"choices": ["Open", "Closed"]},
+            section=section,
+        ).info("Choose whether newly created groups and the ungrouped section start open or closed.").needs_reload_ui(),
+    )
 
 
 script_callbacks.on_ui_settings(on_ui_settings)

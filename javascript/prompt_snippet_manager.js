@@ -1,5 +1,6 @@
 (() => {
     const STORAGE_KEY = "forge_prompt_snippets_v1";
+    const GROUP_STORAGE_KEY = "forge_prompt_snippet_groups_v1";
     const STYLE_ID = "forge-prompt-snippet-style";
     const TOOLBAR_CLASS = "forge-prompt-snippet-toolbar";
     const MENU_CLASS = "forge-prompt-snippet-menu";
@@ -12,6 +13,8 @@
     const THUMBNAIL_ASK = "ask before using latest generation thumbnail";
     const THUMBNAIL_NEVER = "never auto-use it";
     const THUMBNAIL_STORAGE_MAX_SIZE = 256;
+    const GROUP_DEFAULT_OPT_KEY = "forge_prompt_snippets_groups_default_state";
+    const GROUP_DEFAULT_OPEN = "open";
 
     const FIELD_MAP = [
         { id: "txt2img_prompt", type: "positive", label: "T2I Positive" },
@@ -19,6 +22,7 @@
         { id: "img2img_prompt", type: "positive", label: "I2I Positive" },
         { id: "img2img_neg_prompt", type: "negative", label: "I2I Negative" },
     ];
+    let activeDragData = "";
 
     function loadSnippets() {
         try {
@@ -34,6 +38,33 @@
 
     function saveSnippets(snippets) {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(snippets));
+    }
+
+    function createId() {
+        return `${Date.now()}_${Math.random().toString(16).slice(2)}`;
+    }
+
+    function loadGroups() {
+        try {
+            const raw = localStorage.getItem(GROUP_STORAGE_KEY);
+            if (!raw) return [];
+            const parsed = JSON.parse(raw);
+            if (!Array.isArray(parsed)) return [];
+            return parsed.filter((group) =>
+                group
+                && typeof group === "object"
+                && typeof group.id === "string"
+                && typeof group.name === "string"
+                && group.name.trim()
+            );
+        } catch (err) {
+            console.warn("Prompt snippets: failed to parse group storage", err);
+            return [];
+        }
+    }
+
+    function saveGroups(groups) {
+        localStorage.setItem(GROUP_STORAGE_KEY, JSON.stringify(groups));
     }
 
     function normalizeText(text) {
@@ -236,6 +267,13 @@
         return "always";
     }
 
+    function getGroupsOpenByDefault() {
+        const raw = (typeof opts === "object" && opts !== null)
+            ? String(opts[GROUP_DEFAULT_OPT_KEY] || "")
+            : "";
+        return raw.trim().toLowerCase() === GROUP_DEFAULT_OPEN;
+    }
+
     function applyDensityClass() {
         if (!document.body) return;
         document.body.classList.remove("fps-density-compact", "fps-density-comfortable");
@@ -316,12 +354,12 @@
         pop.appendChild(actions);
     }
 
-    function showInlineNamePrompt(anchorEl, defaultName, onSave) {
-        const pop = makePopover(anchorEl, "Save snippet");
+    function showInlineNamePrompt(anchorEl, defaultName, onSave, titleText = "Save snippet", labelText = "Snippet name") {
+        const pop = makePopover(anchorEl, titleText);
 
         const body = document.createElement("div");
         body.className = "fps-popover-body";
-        body.textContent = "Snippet name";
+        body.textContent = labelText;
 
         const input = document.createElement("input");
         input.className = "fps-popover-input";
@@ -365,24 +403,105 @@
         input.select();
     }
 
-    function showInlineDeleteConfirm(anchorEl, snippetName, onDelete) {
-        const pop = makePopover(anchorEl, "Delete snippet");
+    function appendGroupOptions(select, selectedGroupId = null) {
+        const ungrouped = document.createElement("option");
+        ungrouped.value = "";
+        ungrouped.textContent = "Ungrouped";
+        select.appendChild(ungrouped);
 
-        const body = document.createElement("div");
-        body.className = "fps-popover-body";
-        body.textContent = `Delete "${snippetName || "(unnamed)"}"?`;
+        const groups = [...loadGroups()].sort((a, b) =>
+            a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
+        );
+        groups.forEach((group) => {
+            const option = document.createElement("option");
+            option.value = group.id;
+            option.textContent = group.name;
+            select.appendChild(option);
+        });
+
+        select.value = selectedGroupId || "";
+    }
+
+    function showInlineSnippetPrompt(anchorEl, defaultName, onSave) {
+        const pop = makePopover(anchorEl, "Save snippet");
+
+        const nameLabel = document.createElement("div");
+        nameLabel.className = "fps-popover-body";
+        nameLabel.textContent = "Snippet name";
+
+        const input = document.createElement("input");
+        input.className = "fps-popover-input";
+        input.value = defaultName;
+
+        const groupLabel = document.createElement("div");
+        groupLabel.className = "fps-popover-body";
+        groupLabel.textContent = "Group";
+
+        const groupSelect = document.createElement("select");
+        groupSelect.className = "fps-popover-input";
+        groupSelect.title = "Choose an existing group or leave this snippet ungrouped.";
+        appendGroupOptions(groupSelect);
 
         const actions = document.createElement("div");
         actions.className = "fps-popover-actions";
 
         const cancel = document.createElement("button");
         cancel.textContent = "Cancel";
-        cancel.title = "Keep this snippet.";
+        cancel.title = "Close without saving.";
+        cancel.onclick = closePopover;
+
+        const save = document.createElement("button");
+        save.textContent = "Save";
+        save.title = "Save this snippet with the selected name and group.";
+        save.onclick = () => {
+            const value = (input.value || "").trim() || defaultName;
+            onSave(value, groupSelect.value || null);
+            closePopover();
+        };
+
+        input.addEventListener("keydown", (ev) => {
+            if (ev.key === "Enter") {
+                ev.preventDefault();
+                save.click();
+            }
+            if (ev.key === "Escape") {
+                ev.preventDefault();
+                cancel.click();
+            }
+        });
+
+        actions.appendChild(cancel);
+        actions.appendChild(save);
+        pop.appendChild(nameLabel);
+        pop.appendChild(input);
+        pop.appendChild(groupLabel);
+        pop.appendChild(groupSelect);
+        pop.appendChild(actions);
+
+        input.focus();
+        input.select();
+    }
+
+    function showInlineDeleteConfirm(anchorEl, itemName, onDelete, itemType = "snippet") {
+        const pop = makePopover(anchorEl, `Delete ${itemType}`);
+
+        const body = document.createElement("div");
+        body.className = "fps-popover-body";
+        body.textContent = itemType === "group"
+            ? `Delete "${itemName || "(unnamed)"}"? Its snippets will become ungrouped.`
+            : `Delete "${itemName || "(unnamed)"}"?`;
+
+        const actions = document.createElement("div");
+        actions.className = "fps-popover-actions";
+
+        const cancel = document.createElement("button");
+        cancel.textContent = "Cancel";
+        cancel.title = `Keep this ${itemType}.`;
         cancel.onclick = closePopover;
 
         const del = document.createElement("button");
         del.textContent = "Delete";
-        del.title = "Delete permanently.";
+        del.title = `Delete this ${itemType}.`;
         del.onclick = () => {
             onDelete();
             closePopover();
@@ -475,12 +594,13 @@
         textarea.dispatchEvent(new Event("change", { bubbles: true }));
     }
 
-    function buildSnippet(name, content, origin) {
+    function buildSnippet(name, content, origin, groupId = null) {
         return {
-            id: `${Date.now()}_${Math.random().toString(16).slice(2)}`,
+            id: createId(),
             name: name || slugPreview(content),
             content,
             origin,
+            groupId,
             starred: false,
             thumbnail: "",
             createdAt: new Date().toISOString(),
@@ -497,7 +617,7 @@
         }
 
         const defaultName = slugPreview(content);
-        showInlineNamePrompt(anchorEl, defaultName, (name) => {
+        showInlineSnippetPrompt(anchorEl, defaultName, (name, groupId) => {
             void (async () => {
                 const seedMode = getThumbnailSeedMode();
                 const latestThumbnail = seedMode === "never" ? "" : await getLatestGalleryThumbnailDataUrl();
@@ -520,7 +640,7 @@
                 }
 
                 const snippets = loadSnippets();
-                const snippet = buildSnippet((name || "").trim() || defaultName, content, origin);
+                const snippet = buildSnippet((name || "").trim() || defaultName, content, origin, groupId);
                 if (thumbnail) {
                     snippet.thumbnail = thumbnail;
                 }
@@ -579,6 +699,89 @@
         return true;
     }
 
+    function setSnippetGroup(id, groupId) {
+        const normalizedGroupId = groupId || null;
+        if (normalizedGroupId && !loadGroups().some((group) => group.id === normalizedGroupId)) return false;
+
+        const snippets = loadSnippets();
+        const idx = snippets.findIndex((snippet) => snippet.id === id);
+        if (idx < 0) return false;
+        snippets[idx].groupId = normalizedGroupId;
+        saveSnippets(snippets);
+        return true;
+    }
+
+    function addGroup(name) {
+        const normalizedName = String(name || "").trim();
+        if (!normalizedName) return null;
+
+        const groups = loadGroups();
+        if (groups.some((group) => group.name.trim().toLowerCase() === normalizedName.toLowerCase())) return null;
+
+        const group = {
+            id: createId(),
+            name: normalizedName,
+            starred: false,
+            collapsed: !getGroupsOpenByDefault(),
+            createdAt: new Date().toISOString(),
+        };
+        groups.push(group);
+        saveGroups(groups);
+        return group;
+    }
+
+    function renameGroup(id, name) {
+        const normalizedName = String(name || "").trim();
+        if (!normalizedName) return false;
+
+        const groups = loadGroups();
+        const idx = groups.findIndex((group) => group.id === id);
+        if (idx < 0) return false;
+        if (groups.some((group) => group.id !== id && group.name.trim().toLowerCase() === normalizedName.toLowerCase())) {
+            return false;
+        }
+
+        groups[idx].name = normalizedName;
+        saveGroups(groups);
+        return true;
+    }
+
+    function deleteGroup(id) {
+        const groups = loadGroups();
+        if (!groups.some((group) => group.id === id)) return false;
+        saveGroups(groups.filter((group) => group.id !== id));
+
+        const snippets = loadSnippets();
+        snippets.forEach((snippet) => {
+            if (snippet.groupId === id) snippet.groupId = null;
+        });
+        saveSnippets(snippets);
+        return true;
+    }
+
+    function updateGroup(id, updates) {
+        const groups = loadGroups();
+        const idx = groups.findIndex((group) => group.id === id);
+        if (idx < 0) return false;
+        groups[idx] = { ...groups[idx], ...updates };
+        saveGroups(groups);
+        return true;
+    }
+
+    function moveGroup(draggedId, targetId, placeAfter) {
+        if (!draggedId || !targetId || draggedId === targetId) return false;
+        const groups = loadGroups();
+        const from = groups.findIndex((group) => group.id === draggedId);
+        const to = groups.findIndex((group) => group.id === targetId);
+        if (from < 0 || to < 0) return false;
+
+        const [dragged] = groups.splice(from, 1);
+        const targetIdx = groups.findIndex((group) => group.id === targetId);
+        groups.splice(Math.max(0, targetIdx + (placeAfter ? 1 : 0)), 0, dragged);
+        saveGroups(groups);
+        return true;
+    }
+
     function sanitizeNameForCompare(name) {
         return String(name || "")
             .toLowerCase()
@@ -616,14 +819,53 @@
         if (!content) return null;
 
         return {
-            id: `${Date.now()}_${Math.random().toString(16).slice(2)}`,
+            id: createId(),
             name,
             content: preserveSnippetText(content),
             origin,
+            groupId: typeof raw.groupId === "string" ? raw.groupId : null,
             starred,
             thumbnail,
             createdAt: typeof raw.createdAt === "string" ? raw.createdAt : new Date().toISOString(),
         };
+    }
+
+    function sanitizeImportedGroup(raw) {
+        if (!raw || typeof raw !== "object") return null;
+        const name = typeof raw.name === "string" ? raw.name.trim() : "";
+        if (!name) return null;
+        return {
+            id: typeof raw.id === "string" && raw.id ? raw.id : createId(),
+            name,
+            starred: raw.starred === true,
+            collapsed: typeof raw.collapsed === "boolean" ? raw.collapsed : !getGroupsOpenByDefault(),
+            createdAt: typeof raw.createdAt === "string" ? raw.createdAt : new Date().toISOString(),
+        };
+    }
+
+    function mergeImportedGroups(existingGroups, importedGroups, importedSnippets) {
+        const groups = [...existingGroups];
+        const idMap = new Map();
+        const byName = new Map(groups.map((group) => [group.name.trim().toLowerCase(), group]));
+
+        importedGroups.forEach((importedGroup) => {
+            const existing = byName.get(importedGroup.name.trim().toLowerCase());
+            if (existing) {
+                idMap.set(importedGroup.id, existing.id);
+                return;
+            }
+
+            const added = { ...importedGroup, id: createId() };
+            groups.push(added);
+            byName.set(added.name.trim().toLowerCase(), added);
+            idMap.set(importedGroup.id, added.id);
+        });
+
+        const snippets = importedSnippets.map((snippet) => ({
+            ...snippet,
+            groupId: snippet.groupId && idMap.has(snippet.groupId) ? idMap.get(snippet.groupId) : null,
+        }));
+        return { groups, snippets };
     }
 
     function downloadJson(filename, data) {
@@ -641,9 +883,11 @@
 
     function exportSnippets(scope) {
         const all = loadSnippets();
-        const payload = scope === "all" ? all : [];
+        const payload = scope === "all"
+            ? { version: 2, groups: loadGroups(), snippets: all }
+            : null;
 
-        if (!payload.length) return false;
+        if (!payload || (!payload.snippets.length && !payload.groups.length)) return false;
 
         const stamp = new Date().toISOString().replace(/[:.]/g, "-");
         const file = `forge_prompt_snippets_all_${stamp}.json`;
@@ -656,7 +900,12 @@
         const stamp = new Date().toISOString().replace(/[:.]/g, "-");
         const nameSafe = (snippet.name || "snippet").replace(/[^a-zA-Z0-9_-]+/g, "_").replace(/^_+|_+$/g, "") || "snippet";
         const file = `forge_prompt_snippet_${nameSafe}_${stamp}.json`;
-        downloadJson(file, [snippet]);
+        const group = snippet.groupId ? loadGroups().find((item) => item.id === snippet.groupId) : null;
+        downloadJson(file, {
+            version: 2,
+            groups: group ? [group] : [],
+            snippets: [snippet],
+        });
         return true;
     }
     
@@ -693,7 +942,12 @@
             reader.onload = () => {
                 try {
                     const parsed = JSON.parse(String(reader.result || "[]"));
-                    const list = Array.isArray(parsed) ? parsed : [];
+                    const list = Array.isArray(parsed)
+                        ? parsed
+                        : (parsed && Array.isArray(parsed.snippets) ? parsed.snippets : []);
+                    const groups = Array.isArray(parsed?.groups)
+                        ? parsed.groups.map(sanitizeImportedGroup).filter(Boolean)
+                        : [];
                     const cleaned = list.map(sanitizeImportedSnippet).filter(Boolean);
 
                     if (!cleaned.length) {
@@ -701,7 +955,7 @@
                         return;
                     }
 
-                    onDone({ ok: true, snippets: cleaned, count: cleaned.length });
+                    onDone({ ok: true, snippets: cleaned, groups, count: cleaned.length });
                 } catch (err) {
                     onDone({ ok: false, message: `Import failed: ${err.message}` });
                 } finally {
@@ -720,7 +974,10 @@
         input.click();
     }
 
-    function showImportConflictResolver(anchorEl, existingSnippets, importedSnippets, onDone) {
+    function showImportConflictResolver(anchorEl, existingSnippets, importedSnippets, importedGroups, onDone) {
+        const mergedImport = mergeImportedGroups(loadGroups(), importedGroups, importedSnippets);
+        const nextGroups = mergedImport.groups;
+        importedSnippets = mergedImport.snippets;
         const existingByKey = new Map();
         existingSnippets.forEach((s) => {
             const key = sanitizeNameForCompare(s.name);
@@ -752,6 +1009,7 @@
         });
 
         if (!conflicts.length && !nonConflicts.length) {
+            saveGroups(nextGroups);
             onDone({
                 ok: true,
                 imported: importedSnippets.length,
@@ -768,6 +1026,7 @@
         if (!conflicts.length) {
             const next = [...existingSnippets, ...nonConflicts];
             saveSnippets(next);
+            saveGroups(nextGroups);
             onDone({
                 ok: true,
                 imported: importedSnippets.length,
@@ -953,6 +1212,7 @@
 
             const next = [...nextExisting, ...additions];
             saveSnippets(next);
+            saveGroups(nextGroups);
             closePopover();
             onDone({
                 ok: true,
@@ -971,33 +1231,31 @@
         pop.appendChild(actions);
     }
 
-    function moveSnippetInScopedOrder(fieldType, draggedId, targetId, placeAfter) {
-        if (!draggedId || !targetId || draggedId === targetId) return false;
+    function moveSnippet(draggedId, targetGroupId, targetId = null, placeAfter = true) {
+        if (!draggedId || draggedId === targetId) return false;
 
-        const all = loadSnippets();
-        const inScope = (s) => s.origin === fieldType || s.origin === "both";
-        const scoped = all.filter(inScope);
+        const snippets = loadSnippets();
+        const from = snippets.findIndex((snippet) => snippet.id === draggedId);
+        if (from < 0) return false;
 
-        const from = scoped.findIndex((s) => s.id === draggedId);
-        const to = scoped.findIndex((s) => s.id === targetId);
-        if (from < 0 || to < 0) return false;
+        const [dragged] = snippets.splice(from, 1);
+        dragged.groupId = targetGroupId || null;
 
-        const [dragged] = scoped.splice(from, 1);
-        const targetIdx = scoped.findIndex((s) => s.id === targetId);
-        const insertAt = Math.max(0, targetIdx + (placeAfter ? 1 : 0));
-        scoped.splice(insertAt, 0, dragged);
+        let insertAt = snippets.length;
+        if (targetId) {
+            const targetIdx = snippets.findIndex((snippet) => snippet.id === targetId);
+            if (targetIdx < 0) return false;
+            insertAt = targetIdx + (placeAfter ? 1 : 0);
+        } else {
+            const lastInGroup = snippets.reduce(
+                (last, snippet, idx) => ((snippet.groupId || null) === dragged.groupId ? idx : last),
+                -1
+            );
+            if (lastInGroup >= 0) insertAt = lastInGroup + 1;
+        }
 
-        let scopeCursor = 0;
-        const merged = all.map((snippet) => {
-            if (inScope(snippet)) {
-                const nextScoped = scoped[scopeCursor];
-                scopeCursor += 1;
-                return nextScoped;
-            }
-            return snippet;
-        });
-
-        saveSnippets(merged);
+        snippets.splice(Math.max(0, insertAt), 0, dragged);
+        saveSnippets(snippets);
         return true;
     }
 
@@ -1047,6 +1305,74 @@
     opacity: 0.8;
     font-size: 14px;
     padding: 10px;
+}
+.${MENU_CLASS} .fps-group {
+    border: 1px solid var(--block-border-color, #4b5268);
+    border-radius: 10px;
+    margin: 8px 0;
+    overflow: hidden;
+    background: rgba(10, 14, 24, 0.35);
+}
+.${MENU_CLASS} .fps-group.fps-group-starred {
+    border-color: rgba(255, 215, 96, 0.72);
+}
+.${MENU_CLASS} .fps-group.fps-group-dragging {
+    opacity: 0.55;
+}
+.${MENU_CLASS} .fps-group.fps-group-drop-before {
+    border-top: 3px solid rgba(126, 181, 255, 0.95);
+}
+.${MENU_CLASS} .fps-group.fps-group-drop-after {
+    border-bottom: 3px solid rgba(126, 181, 255, 0.95);
+}
+.${MENU_CLASS} .fps-group-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    background: rgba(255, 255, 255, 0.05);
+}
+.${MENU_CLASS} .fps-group-toggle {
+    flex: 1 1 auto;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    text-align: left;
+    font-weight: 700;
+    font-size: 15px;
+    cursor: pointer;
+    padding: 3px 0;
+}
+.${MENU_CLASS} .fps-group-count {
+    opacity: 0.72;
+    font-weight: 500;
+}
+.${MENU_CLASS} .fps-group-header-actions {
+    display: flex;
+    gap: 5px;
+    align-items: center;
+}
+.${MENU_CLASS} .fps-group-header-actions button {
+    border: 1px solid var(--button-border-color, #666);
+    background: var(--button-secondary-background-fill, #2b2b2b);
+    color: var(--button-secondary-text-color, #fff);
+    border-radius: 7px;
+    padding: 3px 7px;
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+}
+.${MENU_CLASS} .fps-group-body {
+    padding: 0 8px 4px;
+    min-height: 12px;
+}
+.${MENU_CLASS} .fps-group-body.fps-group-collapsed {
+    display: none;
+}
+.${MENU_CLASS} .fps-group-empty {
+    padding: 9px 4px;
+    opacity: 0.68;
+    font-size: 12px;
 }
 .${MENU_CLASS} .fps-row {
     border: 1px solid var(--input-border-color, #444);
@@ -1165,6 +1491,15 @@
     font-size: 12px;
     font-weight: 600;
     cursor: pointer;
+}
+.${MENU_CLASS} .fps-actions select {
+    border: 1px solid var(--button-border-color, #666);
+    background: var(--input-background-fill, #141414);
+    color: var(--body-text-color, #fff);
+    border-radius: 8px;
+    padding: 5px 9px;
+    font-size: 12px;
+    font-weight: 600;
 }
 .${MENU_CLASS} .fps-close-row {
     display: flex;
@@ -1481,6 +1816,7 @@ body.fps-density-compact .${MENU_CLASS} .fps-list {
         const topActions = document.createElement("div");
         topActions.className = "fps-top-actions";
         let showStarredOnly = false;
+        let ungroupedCollapsed = !getGroupsOpenByDefault();
 
         const btnExportAll = document.createElement("button");
         btnExportAll.textContent = "Export all";
@@ -1501,7 +1837,7 @@ body.fps-density-compact .${MENU_CLASS} .fps-list {
                     return;
                 }
 
-                showImportConflictResolver(btnImport, loadSnippets(), result.snippets || [], (summaryInfo) => {
+                showImportConflictResolver(btnImport, loadSnippets(), result.snippets || [], result.groups || [], (summaryInfo) => {
                     if (!summaryInfo || !summaryInfo.ok) {
                         showInlineNotice(btnImport, "Import was cancelled.");
                         return;
@@ -1516,6 +1852,20 @@ body.fps-density-compact .${MENU_CLASS} .fps-list {
             });
         };
 
+        const btnAddGroup = document.createElement("button");
+        btnAddGroup.textContent = "Add group";
+        btnAddGroup.title = "Create a named snippet group.";
+        btnAddGroup.onclick = () => {
+            showInlineNamePrompt(btnAddGroup, "New group", (name) => {
+                const group = addGroup(name);
+                if (!group) {
+                    showInlineNotice(btnAddGroup, "Group names must be unique and cannot be empty.");
+                    return;
+                }
+                repaint();
+            }, "Add group", "Group name");
+        };
+
         const btnFilterStarred = document.createElement("button");
         btnFilterStarred.textContent = "Starred only: Off";
         btnFilterStarred.title = "Show only starred snippets in this popup.";
@@ -1528,11 +1878,12 @@ body.fps-density-compact .${MENU_CLASS} .fps-list {
 
         topActions.appendChild(btnExportAll);
         topActions.appendChild(btnImport);
+        topActions.appendChild(btnAddGroup);
         topActions.appendChild(btnFilterStarred);
 
         const sortTip = document.createElement("div");
         sortTip.className = "fps-sort-tip";
-        sortTip.textContent = "Tip: drag snippets with the handle to reorder. New snippets are added at the bottom.";
+        sortTip.textContent = "Tip: drag snippets between groups, or drag group headers to reorder groups. Starred groups stay at the top.";
 
         const list = document.createElement("div");
         list.className = "fps-list";
@@ -1550,9 +1901,23 @@ body.fps-density-compact .${MENU_CLASS} .fps-list {
             const starredItems = filteredBySearch.filter((s) => s.starred === true);
             const normalItems = filteredBySearch.filter((s) => s.starred !== true);
             const filtered = [...starredItems, ...normalItems];
+            const groups = loadGroups();
+            const knownGroupIds = new Set(groups.map((group) => group.id));
+            const orderedGroups = [
+                ...groups.filter((group) => group.starred === true),
+                ...groups.filter((group) => group.starred !== true),
+            ];
+            const sections = orderedGroups.map((group) => ({
+                group,
+                snippets: filtered.filter((snippet) => snippet.groupId === group.id),
+            }));
+            sections.push({
+                group: null,
+                snippets: filtered.filter((snippet) => !snippet.groupId || !knownGroupIds.has(snippet.groupId)),
+            });
 
             list.innerHTML = "";
-            if (!filtered.length) {
+            if (!filtered.length && (q || showStarredOnly || !groups.length)) {
                 const empty = document.createElement("div");
                 empty.className = "fps-empty";
                 empty.textContent = "No snippets for this prompt type yet.";
@@ -1560,7 +1925,164 @@ body.fps-density-compact .${MENU_CLASS} .fps-list {
                 return;
             }
 
-            filtered.forEach((snippet) => {
+            sections.forEach((section) => {
+                if ((q || showStarredOnly) && !section.snippets.length) return;
+
+                const group = section.group;
+                const groupId = group ? group.id : null;
+                const groupEl = document.createElement("section");
+                groupEl.className = "fps-group";
+                if (group?.starred === true) groupEl.classList.add("fps-group-starred");
+                if (groupId) groupEl.dataset.groupId = groupId;
+
+                const groupHeader = document.createElement("div");
+                groupHeader.className = "fps-group-header";
+
+                if (group) {
+                    const groupDrag = document.createElement("div");
+                    groupDrag.className = "fps-drag-handle";
+                    groupDrag.textContent = "drag";
+                    groupDrag.title = "Drag to reorder this group.";
+                    groupDrag.draggable = true;
+                    groupDrag.addEventListener("dragstart", (ev) => {
+                        activeDragData = `group:${group.id}`;
+                        groupEl.classList.add("fps-group-dragging");
+                        if (ev.dataTransfer) {
+                            ev.dataTransfer.setData("text/plain", activeDragData);
+                            ev.dataTransfer.effectAllowed = "move";
+                        }
+                    });
+                    groupDrag.addEventListener("dragend", () => {
+                        activeDragData = "";
+                        groupEl.classList.remove("fps-group-dragging");
+                        list.querySelectorAll(".fps-group").forEach((item) =>
+                            item.classList.remove("fps-group-drop-before", "fps-group-drop-after")
+                        );
+                    });
+                    groupHeader.appendChild(groupDrag);
+                }
+
+                const persistedCollapsed = group ? group.collapsed === true : ungroupedCollapsed;
+                const isCollapsed = (q || showStarredOnly) ? false : persistedCollapsed;
+                const toggle = document.createElement("button");
+                toggle.className = "fps-group-toggle";
+                toggle.setAttribute("aria-expanded", String(!isCollapsed));
+                toggle.textContent = `${isCollapsed ? "▶" : "▼"} ${group ? group.name : "Ungrouped"} `;
+                const count = document.createElement("span");
+                count.className = "fps-group-count";
+                count.textContent = `(${section.snippets.length})`;
+                toggle.appendChild(count);
+                toggle.title = isCollapsed ? "Open this group." : "Close this group.";
+                toggle.onclick = () => {
+                    if (group) updateGroup(group.id, { collapsed: !persistedCollapsed });
+                    else ungroupedCollapsed = !persistedCollapsed;
+                    repaint();
+                };
+                groupHeader.appendChild(toggle);
+
+                if (group) {
+                    const headerActions = document.createElement("div");
+                    headerActions.className = "fps-group-header-actions";
+
+                    const starGroup = document.createElement("button");
+                    starGroup.textContent = group.starred === true ? "Unstar" : "Star";
+                    starGroup.title = group.starred === true
+                        ? "Unpin this group."
+                        : "Star and pin this group to the top.";
+                    starGroup.onclick = () => {
+                        updateGroup(group.id, { starred: group.starred !== true });
+                        repaint();
+                    };
+
+                    const renameGroupButton = document.createElement("button");
+                    renameGroupButton.textContent = "Rename";
+                    renameGroupButton.title = "Rename this group.";
+                    renameGroupButton.onclick = () => {
+                        showInlineNamePrompt(renameGroupButton, group.name, (name) => {
+                            if (!renameGroup(group.id, name)) {
+                                showInlineNotice(renameGroupButton, "Group names must be unique and cannot be empty.");
+                                return;
+                            }
+                            repaint();
+                        }, "Rename group", "Group name");
+                    };
+
+                    const deleteGroupButton = document.createElement("button");
+                    deleteGroupButton.textContent = "Delete";
+                    deleteGroupButton.title = "Delete this group and leave its snippets ungrouped.";
+                    deleteGroupButton.onclick = () => {
+                        showInlineDeleteConfirm(deleteGroupButton, group.name, () => {
+                            deleteGroup(group.id);
+                            repaint();
+                        }, "group");
+                    };
+
+                    headerActions.appendChild(starGroup);
+                    headerActions.appendChild(renameGroupButton);
+                    headerActions.appendChild(deleteGroupButton);
+                    groupHeader.appendChild(headerActions);
+                }
+
+                groupHeader.addEventListener("dragover", (ev) => {
+                    ev.preventDefault();
+                    const dragData = activeDragData;
+                    if (dragData.startsWith("group:") && group) {
+                        const rect = groupHeader.getBoundingClientRect();
+                        const after = (ev.clientY - rect.top) > (rect.height / 2);
+                        groupEl.classList.toggle("fps-group-drop-after", after);
+                        groupEl.classList.toggle("fps-group-drop-before", !after);
+                    }
+                    if (ev.dataTransfer) ev.dataTransfer.dropEffect = "move";
+                });
+                groupHeader.addEventListener("dragleave", () => {
+                    groupEl.classList.remove("fps-group-drop-before", "fps-group-drop-after");
+                });
+                groupHeader.addEventListener("drop", (ev) => {
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    groupEl.classList.remove("fps-group-drop-before", "fps-group-drop-after");
+                    const dragData = (ev.dataTransfer ? ev.dataTransfer.getData("text/plain") : "") || activeDragData;
+                    activeDragData = "";
+                    if (dragData.startsWith("snippet:")) {
+                        if (moveSnippet(dragData.slice(8), groupId)) repaint();
+                        return;
+                    }
+                    if (dragData.startsWith("group:") && group) {
+                        const rect = groupHeader.getBoundingClientRect();
+                        const after = (ev.clientY - rect.top) > (rect.height / 2);
+                        if (moveGroup(dragData.slice(6), group.id, after)) repaint();
+                    }
+                });
+
+                const groupBody = document.createElement("div");
+                groupBody.className = "fps-group-body";
+                if (isCollapsed) groupBody.classList.add("fps-group-collapsed");
+                groupBody.addEventListener("dragover", (ev) => {
+                    if (!activeDragData.startsWith("snippet:")) return;
+                    ev.preventDefault();
+                    if (ev.dataTransfer) ev.dataTransfer.dropEffect = "move";
+                });
+                groupBody.addEventListener("drop", (ev) => {
+                    if (ev.target.closest(".fps-row")) return;
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    const dragData = (ev.dataTransfer ? ev.dataTransfer.getData("text/plain") : "") || activeDragData;
+                    activeDragData = "";
+                    if (dragData.startsWith("snippet:") && moveSnippet(dragData.slice(8), groupId)) repaint();
+                });
+
+                groupEl.appendChild(groupHeader);
+                groupEl.appendChild(groupBody);
+                list.appendChild(groupEl);
+
+                if (!section.snippets.length) {
+                    const emptyGroup = document.createElement("div");
+                    emptyGroup.className = "fps-group-empty";
+                    emptyGroup.textContent = "Drop snippets here.";
+                    groupBody.appendChild(emptyGroup);
+                }
+
+                section.snippets.forEach((snippet) => {
                 const row = document.createElement("div");
                 row.className = "fps-row";
                 row.dataset.snippetId = snippet.id;
@@ -1627,18 +2149,21 @@ body.fps-density-compact .${MENU_CLASS} .fps-list {
                 dragHandle.draggable = true;
 
                 dragHandle.addEventListener("dragstart", (ev) => {
+                    activeDragData = `snippet:${snippet.id}`;
                     row.classList.add("fps-dragging");
                     if (ev.dataTransfer) {
-                        ev.dataTransfer.setData("text/plain", snippet.id);
+                        ev.dataTransfer.setData("text/plain", activeDragData);
                         ev.dataTransfer.effectAllowed = "move";
                     }
                 });
                 dragHandle.addEventListener("dragend", () => {
+                    activeDragData = "";
                     row.classList.remove("fps-dragging");
                     list.querySelectorAll(".fps-row").forEach((r) => r.classList.remove("fps-drop-before", "fps-drop-after"));
                 });
 
                 row.addEventListener("dragover", (ev) => {
+                    if (!activeDragData.startsWith("snippet:")) return;
                     ev.preventDefault();
                     const rect = row.getBoundingClientRect();
                     const after = (ev.clientY - rect.top) > (rect.height / 2);
@@ -1652,11 +2177,14 @@ body.fps-density-compact .${MENU_CLASS} .fps-list {
                 row.addEventListener("drop", (ev) => {
                     ev.preventDefault();
                     row.classList.remove("fps-drop-before", "fps-drop-after");
-                    const draggedId = ev.dataTransfer ? ev.dataTransfer.getData("text/plain") : "";
+                    const dragData = (ev.dataTransfer ? ev.dataTransfer.getData("text/plain") : "") || activeDragData;
+                    activeDragData = "";
+                    if (!dragData.startsWith("snippet:")) return;
+                    const draggedId = dragData.slice(8);
                     if (!draggedId || draggedId === snippet.id) return;
                     const rect = row.getBoundingClientRect();
                     const placeAfter = (ev.clientY - rect.top) > (rect.height / 2);
-                    const moved = moveSnippetInScopedOrder(fieldType, draggedId, snippet.id, placeAfter);
+                    const moved = moveSnippet(draggedId, groupId, snippet.id, placeAfter);
                     if (moved) repaint();
                 });
 
@@ -1708,6 +2236,14 @@ body.fps-density-compact .${MENU_CLASS} .fps-list {
                     });
                 };
 
+                const groupSelect = document.createElement("select");
+                groupSelect.title = "Move this snippet to another group.";
+                appendGroupOptions(groupSelect, groupId);
+                groupSelect.setAttribute("aria-label", `Group for ${snippet.name || "snippet"}`);
+                groupSelect.onchange = () => {
+                    if (setSnippetGroup(snippet.id, groupSelect.value || null)) repaint();
+                };
+
                 const btnSaveBoth = document.createElement("button");
                 btnSaveBoth.textContent = "Mark both";
                 btnSaveBoth.title = "Make this snippet available in both positive and negative menus.";
@@ -1755,6 +2291,7 @@ body.fps-density-compact .${MENU_CLASS} .fps-list {
                 actions.appendChild(btnReplace);
                 actions.appendChild(btnExportOne);
                 actions.appendChild(btnRename);
+                actions.appendChild(groupSelect);
                 if (snippet.origin === "both") {
                     actions.appendChild(btnPositiveOnly);
                     actions.appendChild(btnNegativeOnly);
@@ -1773,7 +2310,8 @@ body.fps-density-compact .${MENU_CLASS} .fps-list {
 
                 rowBody.appendChild(contentBlock);
                 row.appendChild(rowBody);
-                list.appendChild(row);
+                groupBody.appendChild(row);
+                });
             });
         }
 
