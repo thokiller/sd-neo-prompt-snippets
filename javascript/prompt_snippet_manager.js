@@ -13,8 +13,9 @@
     const THUMBNAIL_ASK = "ask before using latest generation thumbnail";
     const THUMBNAIL_NEVER = "never auto-use it";
     const THUMBNAIL_STORAGE_MAX_SIZE = 256;
-    const GROUP_DEFAULT_OPT_KEY = "forge_prompt_snippets_groups_default_state";
-    const GROUP_DEFAULT_OPEN = "open";
+    const UNGROUPED_OPEN_STORAGE_KEY = "forge_prompt_snippet_ungrouped_open_v1";
+    const SHARE_GROUPS_OPT_KEY = "forge_prompt_snippets_share_groups";
+    const GROUP_SCOPES = ["positive", "negative", "both"];
 
     const FIELD_MAP = [
         { id: "txt2img_prompt", type: "positive", label: "T2I Positive" },
@@ -50,13 +51,19 @@
             if (!raw) return [];
             const parsed = JSON.parse(raw);
             if (!Array.isArray(parsed)) return [];
-            return parsed.filter((group) =>
+            const groups = parsed.filter((group) =>
                 group
                 && typeof group === "object"
                 && typeof group.id === "string"
                 && typeof group.name === "string"
                 && group.name.trim()
             );
+            if (groups.some((group) => !GROUP_SCOPES.includes(group.scope))) {
+                const migrated = assignMissingGroupScopes(groups, loadSnippets());
+                saveGroups(migrated);
+                return migrated;
+            }
+            return groups;
         } catch (err) {
             console.warn("Prompt snippets: failed to parse group storage", err);
             return [];
@@ -65,6 +72,50 @@
 
     function saveGroups(groups) {
         localStorage.setItem(GROUP_STORAGE_KEY, JSON.stringify(groups));
+    }
+
+    // Legacy groups had no scope; infer it from the snippets they contain.
+    function assignMissingGroupScopes(groups, snippets) {
+        return groups.map((group) => {
+            const { collapsed, ...rest } = group;
+            if (GROUP_SCOPES.includes(rest.scope)) return rest;
+            const origins = new Set(snippets.filter((snippet) => snippet.groupId === rest.id).map((snippet) => snippet.origin));
+            const hasPositive = origins.has("positive") || origins.has("both");
+            const hasNegative = origins.has("negative") || origins.has("both");
+            const scope = hasPositive && hasNegative ? "both" : (hasNegative ? "negative" : "positive");
+            return { ...rest, scope, openByDefault: rest.openByDefault === true };
+        });
+    }
+
+    function sharesGroups() {
+        if (typeof opts !== "object" || opts === null) return false;
+        const raw = opts[SHARE_GROUPS_OPT_KEY];
+        return raw === true || String(raw).toLowerCase() === "true";
+    }
+
+    function isGroupVisibleFor(group, fieldType) {
+        return sharesGroups() || group.scope === "both" || group.scope === fieldType;
+    }
+
+    function scopesOverlap(a, b) {
+        return a === b || a === "both" || b === "both";
+    }
+
+    function loadGroupsFor(fieldType) {
+        return loadGroups().filter((group) => isGroupVisibleFor(group, fieldType));
+    }
+
+    // Follows the group sharing setting: one shared value when sharing, otherwise one per prompt type.
+    function ungroupedOpenStorageKey(fieldType) {
+        return sharesGroups() ? UNGROUPED_OPEN_STORAGE_KEY : `${UNGROUPED_OPEN_STORAGE_KEY}_${fieldType}`;
+    }
+
+    function isUngroupedOpenByDefault(fieldType) {
+        return localStorage.getItem(ungroupedOpenStorageKey(fieldType)) !== "false";
+    }
+
+    function setUngroupedOpenByDefault(fieldType, open) {
+        localStorage.setItem(ungroupedOpenStorageKey(fieldType), open ? "true" : "false");
     }
 
     function normalizeText(text) {
@@ -267,12 +318,6 @@
         return "always";
     }
 
-    function getGroupsOpenByDefault() {
-        const raw = (typeof opts === "object" && opts !== null)
-            ? String(opts[GROUP_DEFAULT_OPT_KEY] || "")
-            : "";
-        return raw.trim().toLowerCase() === GROUP_DEFAULT_OPEN;
-    }
 
     function applyDensityClass() {
         if (!document.body) return;
@@ -403,13 +448,13 @@
         input.select();
     }
 
-    function appendGroupOptions(select, selectedGroupId = null) {
+    function appendGroupOptions(select, fieldType, selectedGroupId = null) {
         const ungrouped = document.createElement("option");
         ungrouped.value = "";
         ungrouped.textContent = "Ungrouped";
         select.appendChild(ungrouped);
 
-        const groups = [...loadGroups()].sort((a, b) =>
+        const groups = [...loadGroupsFor(fieldType)].sort((a, b) =>
             a.name.localeCompare(b.name, undefined, { sensitivity: "base" })
         );
         groups.forEach((group) => {
@@ -422,7 +467,7 @@
         select.value = selectedGroupId || "";
     }
 
-    function showInlineSnippetPrompt(anchorEl, defaultName, onSave) {
+    function showInlineSnippetPrompt(anchorEl, defaultName, fieldType, onSave) {
         const pop = makePopover(anchorEl, "Save snippet");
 
         const nameLabel = document.createElement("div");
@@ -440,7 +485,7 @@
         const groupSelect = document.createElement("select");
         groupSelect.className = "fps-popover-input";
         groupSelect.title = "Choose an existing group or leave this snippet ungrouped.";
-        appendGroupOptions(groupSelect);
+        appendGroupOptions(groupSelect, fieldType);
 
         const actions = document.createElement("div");
         actions.className = "fps-popover-actions";
@@ -617,7 +662,7 @@
         }
 
         const defaultName = slugPreview(content);
-        showInlineSnippetPrompt(anchorEl, defaultName, (name, groupId) => {
+        showInlineSnippetPrompt(anchorEl, defaultName, origin, (name, groupId) => {
             void (async () => {
                 const seedMode = getThumbnailSeedMode();
                 const latestThumbnail = seedMode === "never" ? "" : await getLatestGalleryThumbnailDataUrl();
@@ -711,18 +756,29 @@
         return true;
     }
 
-    function addGroup(name) {
+    function hasGroupNameConflict(groups, name, scope, ignoreId = null) {
+        const key = name.trim().toLowerCase();
+        return groups.some((group) =>
+            group.id !== ignoreId
+            && group.name.trim().toLowerCase() === key
+            && (sharesGroups() || scopesOverlap(group.scope, scope))
+        );
+    }
+
+    function addGroup(name, scope) {
         const normalizedName = String(name || "").trim();
         if (!normalizedName) return null;
+        const groupScope = GROUP_SCOPES.includes(scope) ? scope : "positive";
 
         const groups = loadGroups();
-        if (groups.some((group) => group.name.trim().toLowerCase() === normalizedName.toLowerCase())) return null;
+        if (hasGroupNameConflict(groups, normalizedName, groupScope)) return null;
 
         const group = {
             id: createId(),
             name: normalizedName,
+            scope: groupScope,
             starred: false,
-            collapsed: !getGroupsOpenByDefault(),
+            openByDefault: false,
             createdAt: new Date().toISOString(),
         };
         groups.push(group);
@@ -737,9 +793,7 @@
         const groups = loadGroups();
         const idx = groups.findIndex((group) => group.id === id);
         if (idx < 0) return false;
-        if (groups.some((group) => group.id !== id && group.name.trim().toLowerCase() === normalizedName.toLowerCase())) {
-            return false;
-        }
+        if (hasGroupNameConflict(groups, normalizedName, groups[idx].scope, id)) return false;
 
         groups[idx].name = normalizedName;
         saveGroups(groups);
@@ -837,8 +891,9 @@
         return {
             id: typeof raw.id === "string" && raw.id ? raw.id : createId(),
             name,
+            scope: GROUP_SCOPES.includes(raw.scope) ? raw.scope : null,
             starred: raw.starred === true,
-            collapsed: typeof raw.collapsed === "boolean" ? raw.collapsed : !getGroupsOpenByDefault(),
+            openByDefault: raw.openByDefault === true,
             createdAt: typeof raw.createdAt === "string" ? raw.createdAt : new Date().toISOString(),
         };
     }
@@ -846,10 +901,12 @@
     function mergeImportedGroups(existingGroups, importedGroups, importedSnippets) {
         const groups = [...existingGroups];
         const idMap = new Map();
-        const byName = new Map(groups.map((group) => [group.name.trim().toLowerCase(), group]));
+        const scopedImports = assignMissingGroupScopes(importedGroups, importedSnippets);
+        const groupKey = (group) => `${group.scope}\n${group.name.trim().toLowerCase()}`;
+        const byKey = new Map(groups.map((group) => [groupKey(group), group]));
 
-        importedGroups.forEach((importedGroup) => {
-            const existing = byName.get(importedGroup.name.trim().toLowerCase());
+        scopedImports.forEach((importedGroup) => {
+            const existing = byKey.get(groupKey(importedGroup));
             if (existing) {
                 idMap.set(importedGroup.id, existing.id);
                 return;
@@ -857,7 +914,7 @@
 
             const added = { ...importedGroup, id: createId() };
             groups.push(added);
-            byName.set(added.name.trim().toLowerCase(), added);
+            byKey.set(groupKey(added), added);
             idMap.set(importedGroup.id, added.id);
         });
 
@@ -1362,6 +1419,10 @@
     font-weight: 600;
     cursor: pointer;
 }
+.${MENU_CLASS} .fps-group-header-actions button.fps-active {
+    background: rgba(126, 181, 255, 0.2);
+    border-color: rgba(126, 181, 255, 0.75);
+}
 .${MENU_CLASS} .fps-group-body {
     padding: 0 8px 4px;
     min-height: 12px;
@@ -1816,7 +1877,9 @@ body.fps-density-compact .${MENU_CLASS} .fps-list {
         const topActions = document.createElement("div");
         topActions.className = "fps-top-actions";
         let showStarredOnly = false;
-        let ungroupedCollapsed = !getGroupsOpenByDefault();
+        // Open/closed state lasts only while this popup is open; defaults come from each group's setting.
+        const openOverrides = new Map();
+        const UNGROUPED_KEY = "__ungrouped__";
 
         const btnExportAll = document.createElement("button");
         btnExportAll.textContent = "Export all";
@@ -1857,7 +1920,7 @@ body.fps-density-compact .${MENU_CLASS} .fps-list {
         btnAddGroup.title = "Create a named snippet group.";
         btnAddGroup.onclick = () => {
             showInlineNamePrompt(btnAddGroup, "New group", (name) => {
-                const group = addGroup(name);
+                const group = addGroup(name, fieldType);
                 if (!group) {
                     showInlineNotice(btnAddGroup, "Group names must be unique and cannot be empty.");
                     return;
@@ -1901,7 +1964,7 @@ body.fps-density-compact .${MENU_CLASS} .fps-list {
             const starredItems = filteredBySearch.filter((s) => s.starred === true);
             const normalItems = filteredBySearch.filter((s) => s.starred !== true);
             const filtered = [...starredItems, ...normalItems];
-            const groups = loadGroups();
+            const groups = loadGroupsFor(fieldType);
             const knownGroupIds = new Set(groups.map((group) => group.id));
             const orderedGroups = [
                 ...groups.filter((group) => group.starred === true),
@@ -1962,8 +2025,10 @@ body.fps-density-compact .${MENU_CLASS} .fps-list {
                     groupHeader.appendChild(groupDrag);
                 }
 
-                const persistedCollapsed = group ? group.collapsed === true : ungroupedCollapsed;
-                const isCollapsed = (q || showStarredOnly) ? false : persistedCollapsed;
+                const sectionKey = group ? group.id : UNGROUPED_KEY;
+                const openByDefault = group ? group.openByDefault === true : isUngroupedOpenByDefault(fieldType);
+                const isOpen = openOverrides.has(sectionKey) ? openOverrides.get(sectionKey) : openByDefault;
+                const isCollapsed = (q || showStarredOnly) ? false : !isOpen;
                 const toggle = document.createElement("button");
                 toggle.className = "fps-group-toggle";
                 toggle.setAttribute("aria-expanded", String(!isCollapsed));
@@ -1974,15 +2039,30 @@ body.fps-density-compact .${MENU_CLASS} .fps-list {
                 toggle.appendChild(count);
                 toggle.title = isCollapsed ? "Open this group." : "Close this group.";
                 toggle.onclick = () => {
-                    if (group) updateGroup(group.id, { collapsed: !persistedCollapsed });
-                    else ungroupedCollapsed = !persistedCollapsed;
+                    openOverrides.set(sectionKey, !isOpen);
                     repaint();
                 };
                 groupHeader.appendChild(toggle);
 
+                const headerActions = document.createElement("div");
+                headerActions.className = "fps-group-header-actions";
+
+                const defaultOpenButton = document.createElement("button");
+                defaultOpenButton.textContent = openByDefault ? "Opens by default" : "Closed by default";
+                defaultOpenButton.classList.toggle("fps-active", openByDefault);
+                defaultOpenButton.title = openByDefault
+                    ? "This section opens automatically. Click to keep it closed by default."
+                    : "This section starts closed. Click to open it automatically.";
+                defaultOpenButton.onclick = () => {
+                    if (group) updateGroup(group.id, { openByDefault: !openByDefault });
+                    else setUngroupedOpenByDefault(fieldType, !openByDefault);
+                    openOverrides.delete(sectionKey);
+                    repaint();
+                };
+                headerActions.appendChild(defaultOpenButton);
+                groupHeader.appendChild(headerActions);
+
                 if (group) {
-                    const headerActions = document.createElement("div");
-                    headerActions.className = "fps-group-header-actions";
 
                     const starGroup = document.createElement("button");
                     starGroup.textContent = group.starred === true ? "Unstar" : "Star";
@@ -2020,7 +2100,6 @@ body.fps-density-compact .${MENU_CLASS} .fps-list {
                     headerActions.appendChild(starGroup);
                     headerActions.appendChild(renameGroupButton);
                     headerActions.appendChild(deleteGroupButton);
-                    groupHeader.appendChild(headerActions);
                 }
 
                 groupHeader.addEventListener("dragover", (ev) => {
@@ -2238,7 +2317,7 @@ body.fps-density-compact .${MENU_CLASS} .fps-list {
 
                 const groupSelect = document.createElement("select");
                 groupSelect.title = "Move this snippet to another group.";
-                appendGroupOptions(groupSelect, groupId);
+                appendGroupOptions(groupSelect, fieldType, groupId);
                 groupSelect.setAttribute("aria-label", `Group for ${snippet.name || "snippet"}`);
                 groupSelect.onchange = () => {
                     if (setSnippetGroup(snippet.id, groupSelect.value || null)) repaint();

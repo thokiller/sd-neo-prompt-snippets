@@ -47,14 +47,13 @@ def on_ui_settings():
         ).info("Controls whether a new snippet should try to use the latest generated image as its thumbnail.").needs_reload_ui(),
     )
     shared.opts.add_option(
-        "forge_prompt_snippets_groups_default_state",
+        "forge_prompt_snippets_share_groups",
         shared.OptionInfo(
-            "Open",
-            "Default state for new snippet groups",
-            gr.Radio,
-            {"choices": ["Open", "Closed"]},
+            False,
+            "Share snippet groups between positive and negative prompts",
+            gr.Checkbox,
             section=section,
-        ).info("Choose whether newly created groups and the ungrouped section start open or closed.").needs_reload_ui(),
+        ).info("When disabled, groups only appear in the prompt type they were created for.").needs_reload_ui(),
     )
 
 

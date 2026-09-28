@@ -11,6 +11,8 @@ This extension adds snippet tools next to prompt fields in txt2img and img2img.
 - New snippets are saved to the bottom of the list by default.
 - New snippets are ungrouped by default, with an existing-group selector in the save dialog.
 - Create, name, rename, delete, reorder, open, and close snippet groups.
+- Groups start closed each time the popup opens; mark specific groups as "Opens by default". The Ungrouped section opens by default until you set it to closed (set separately for positive and negative unless group sharing is enabled).
+- Groups belong to the prompt type (positive or negative) they were created in, unless group sharing is enabled.
 - Drag snippets between groups or back into the Ungrouped section.
 - Star groups to highlight and pin them above unstarred groups.
 - Snippet popup filtered by prompt type (positive or negative).
@@ -41,7 +43,7 @@ This extension adds snippet tools next to prompt fields in txt2img and img2img.
 - Always use latest generation thumbnail.
 - Ask before using latest generation thumbnail.
 - Never auto-use it.
-- Default state setting for newly created groups and the Ungrouped section (Open or Closed).
+- Setting to share groups between positive and negative prompts (disabled by default).
 - Inline popovers for save, confirm, and notices (no browser alert, prompt, or confirm dialogs).
 
 ## Install Location
@@ -56,7 +58,7 @@ After installing or updating files, restart Forge or use Reload UI.
 
 1. Open Forge and go to txt2img or img2img.
 2. Optional: go to Settings > Extensions > Forge Prompt Snippets and choose Popup size mode (Compact or Comfortable), then Apply settings and Reload UI.
-3. Optional: choose Thumbnail source and whether new groups start open or closed.
+3. Optional: choose Thumbnail source and whether groups are shared between positive and negative prompts.
 4. In Positive prompt or Negative prompt, you will see three new buttons:
 5. Save selected saves highlighted text from the prompt box.
 6. Save full saves the entire prompt box text.
@@ -68,7 +70,7 @@ After installing or updating files, restart Forge or use Reload UI.
 12. Use Starred only to show only starred snippets.
 13. Use Add group to create a named group.
 14. Drag group headers to reorder groups, and star groups to highlight and pin them to the top.
-15. Open or close a group from its header.
+15. Open or close a group from its header. Use the Opens/Closed by default button to choose how a group (or Ungrouped) starts when the popup opens.
 16. Drag a snippet row into another group or the Ungrouped section. You can also use the group selector on the snippet.
 17. Click Star to pin a snippet to the top of its group, or Unstar to remove the pin.
 18. Click Add thumb or Replace thumb to upload a thumbnail.
@@ -97,7 +99,7 @@ After installing or updating files, restart Forge or use Reload UI.
 ## Data Storage
 
 - Snippets are stored in browser localStorage.
-- Group names, order, starred state, and open/closed state are stored separately in browser localStorage.
+- Group names, prompt type, order, starred state, and open-by-default state are stored separately in browser localStorage.
 - Snippets are tied to the browser profile you use to open Forge.
 - If you switch browser, profile, or machine, use JSON export and import to move snippets.
 
