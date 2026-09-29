@@ -98,14 +98,18 @@ After installing or updating files, restart Forge or use Reload UI.
 
 ## Data Storage
 
-- Snippets are stored in browser localStorage.
-- Group names, prompt type, order, starred state, and open-by-default state are stored separately in browser localStorage.
-- Snippets are tied to the browser profile you use to open Forge.
-- If you switch browser, profile, or machine, use JSON export and import to move snippets.
+- The complete library is stored in the dedicated `ROOT/models/prompt-snippets/library.json` file (or the equivalent folder under a custom `--models-dir`).
+- The file includes snippets, thumbnails, groups, prompt types, ordering, starred state, and open-by-default state.
+- Writes are atomic so an interrupted save does not replace a valid library with a partial file.
+- On the first load after this update, existing browser localStorage data is migrated once to the JSON file. The old browser keys are removed only after the server confirms the file was saved.
+- If the JSON file already exists, it is the source of truth and obsolete browser storage is discarded.
+- The library is shared by browsers that connect to the same Forge installation and follows a custom `--models-dir`.
+- Use Export all and Import JSON to back up or move the library to another Forge installation.
 
 ## Notes for Maintainers
 
 - Prompt field IDs are configured in FIELD_MAP.
 - Main script file: javascript/prompt_snippet_manager.js
+- Server persistence: lib_prompt_snippets/store.py
 
 If Forge changes prompt element IDs in a future update, update FIELD_MAP accordingly.

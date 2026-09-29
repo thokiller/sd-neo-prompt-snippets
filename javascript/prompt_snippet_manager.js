@@ -1,6 +1,7 @@
 (() => {
     const STORAGE_KEY = "forge_prompt_snippets_v1";
     const GROUP_STORAGE_KEY = "forge_prompt_snippet_groups_v1";
+    const LIBRARY_API = "/sd-neo-prompt-snippets/v1/library";
     const STYLE_ID = "forge-prompt-snippet-style";
     const TOOLBAR_CLASS = "forge-prompt-snippet-toolbar";
     const MENU_CLASS = "forge-prompt-snippet-menu";
@@ -24,21 +25,21 @@
         { id: "img2img_neg_prompt", type: "negative", label: "I2I Negative" },
     ];
     let activeDragData = "";
+    let libraryState = {
+        schema: 1,
+        snippets: [],
+        groups: [],
+        ungrouped_open: { positive: true, negative: true, shared: true },
+    };
+    let persistQueue = Promise.resolve();
 
     function loadSnippets() {
-        try {
-            const raw = localStorage.getItem(STORAGE_KEY);
-            if (!raw) return [];
-            const parsed = JSON.parse(raw);
-            return Array.isArray(parsed) ? parsed : [];
-        } catch (err) {
-            console.warn("Prompt snippets: failed to parse storage", err);
-            return [];
-        }
+        return libraryState.snippets;
     }
 
     function saveSnippets(snippets) {
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(snippets));
+        libraryState.snippets = snippets;
+        return queueLibrarySave();
     }
 
     function createId() {
@@ -46,32 +47,115 @@
     }
 
     function loadGroups() {
-        try {
-            const raw = localStorage.getItem(GROUP_STORAGE_KEY);
-            if (!raw) return [];
-            const parsed = JSON.parse(raw);
-            if (!Array.isArray(parsed)) return [];
-            const groups = parsed.filter((group) =>
-                group
-                && typeof group === "object"
-                && typeof group.id === "string"
-                && typeof group.name === "string"
-                && group.name.trim()
-            );
-            if (groups.some((group) => !GROUP_SCOPES.includes(group.scope))) {
-                const migrated = assignMissingGroupScopes(groups, loadSnippets());
-                saveGroups(migrated);
-                return migrated;
-            }
-            return groups;
-        } catch (err) {
-            console.warn("Prompt snippets: failed to parse group storage", err);
-            return [];
-        }
+        return libraryState.groups;
     }
 
     function saveGroups(groups) {
-        localStorage.setItem(GROUP_STORAGE_KEY, JSON.stringify(groups));
+        libraryState.groups = groups;
+        return queueLibrarySave();
+    }
+
+    async function requestLibrary(method, payload = null) {
+        const response = await fetch(LIBRARY_API, {
+            method,
+            headers: payload ? { "Content-Type": "application/json" } : undefined,
+            body: payload ? JSON.stringify(payload) : undefined,
+            credentials: "same-origin",
+        });
+        let result = null;
+        try {
+            result = await response.json();
+        } catch {
+            // The status text below is more useful than a secondary JSON parse error.
+        }
+        if (!response.ok) {
+            throw new Error(result?.detail || result?.message || `${response.status} ${response.statusText}`);
+        }
+        return result;
+    }
+
+    function librarySnapshot() {
+        return JSON.parse(JSON.stringify(libraryState));
+    }
+
+    function queueLibrarySave() {
+        const snapshot = librarySnapshot();
+        const operation = persistQueue.then(async () => {
+            await requestLibrary("PUT", snapshot);
+        });
+        persistQueue = operation.catch(() => {});
+        operation.catch((err) => {
+            console.error("Prompt snippets: failed to save JSON library", err);
+        });
+        return operation;
+    }
+
+    function parseLegacyArray(key) {
+        const raw = localStorage.getItem(key);
+        if (!raw) return [];
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed)) throw new Error(`Legacy storage key "${key}" is not an array.`);
+        return parsed;
+    }
+
+    function legacyUngroupedOpen(fieldType) {
+        const suffix = sharesGroups() ? "" : `_${fieldType}`;
+        return localStorage.getItem(`${UNGROUPED_OPEN_STORAGE_KEY}${suffix}`) !== "false";
+    }
+
+    function clearLegacyStorage() {
+        [
+            STORAGE_KEY,
+            GROUP_STORAGE_KEY,
+            UNGROUPED_OPEN_STORAGE_KEY,
+            `${UNGROUPED_OPEN_STORAGE_KEY}_positive`,
+            `${UNGROUPED_OPEN_STORAGE_KEY}_negative`,
+        ].forEach((key) => localStorage.removeItem(key));
+    }
+
+    async function initializeLibrary() {
+        const result = await requestLibrary("GET");
+        const serverLibrary = result?.library;
+        if (!serverLibrary || !Array.isArray(serverLibrary.snippets) || !Array.isArray(serverLibrary.groups)) {
+            throw new Error("The server returned a malformed snippet library.");
+        }
+
+        if (result.exists) {
+            libraryState = serverLibrary;
+            clearLegacyStorage();
+            return;
+        }
+
+        let legacySnippets;
+        let legacyGroups;
+        try {
+            legacySnippets = parseLegacyArray(STORAGE_KEY);
+            legacyGroups = parseLegacyArray(GROUP_STORAGE_KEY);
+        } catch (err) {
+            throw new Error(`Could not migrate browser storage: ${errorMessage(err)}`);
+        }
+
+        const hasLegacyData = legacySnippets.length > 0
+            || legacyGroups.length > 0
+            || localStorage.getItem(UNGROUPED_OPEN_STORAGE_KEY) !== null
+            || localStorage.getItem(`${UNGROUPED_OPEN_STORAGE_KEY}_positive`) !== null
+            || localStorage.getItem(`${UNGROUPED_OPEN_STORAGE_KEY}_negative`) !== null;
+
+        libraryState = {
+            schema: 1,
+            snippets: legacySnippets,
+            groups: assignMissingGroupScopes(legacyGroups, legacySnippets),
+            ungrouped_open: {
+                positive: legacyUngroupedOpen("positive"),
+                negative: legacyUngroupedOpen("negative"),
+                shared: localStorage.getItem(UNGROUPED_OPEN_STORAGE_KEY) !== "false",
+            },
+        };
+
+        if (hasLegacyData) {
+            await requestLibrary("PUT", librarySnapshot());
+            clearLegacyStorage();
+        }
     }
 
     // Legacy groups had no scope; infer it from the snippets they contain.
@@ -105,17 +189,15 @@
         return loadGroups().filter((group) => isGroupVisibleFor(group, fieldType));
     }
 
-    // Follows the group sharing setting: one shared value when sharing, otherwise one per prompt type.
-    function ungroupedOpenStorageKey(fieldType) {
-        return sharesGroups() ? UNGROUPED_OPEN_STORAGE_KEY : `${UNGROUPED_OPEN_STORAGE_KEY}_${fieldType}`;
-    }
-
     function isUngroupedOpenByDefault(fieldType) {
-        return localStorage.getItem(ungroupedOpenStorageKey(fieldType)) !== "false";
+        const key = sharesGroups() ? "shared" : fieldType;
+        return libraryState.ungrouped_open[key] !== false;
     }
 
     function setUngroupedOpenByDefault(fieldType, open) {
-        localStorage.setItem(ungroupedOpenStorageKey(fieldType), open ? "true" : "false");
+        const key = sharesGroups() ? "shared" : fieldType;
+        libraryState.ungrouped_open[key] = !!open;
+        return queueLibrarySave();
     }
 
     function normalizeText(text) {
@@ -222,14 +304,11 @@
         const src = galleryImage?.src;
         if (!src) return "";
 
-        try {
-            const dataUrl = await srcToDataUrl(src);
-            if (!dataUrl.startsWith("data:image/")) return "";
-            return await resizeImageDataUrl(dataUrl, THUMBNAIL_STORAGE_MAX_SIZE);
-        } catch (err) {
-            console.warn("Prompt snippets: could not use latest generation as thumbnail", err);
-            return "";
+        const dataUrl = await srcToDataUrl(src);
+        if (!dataUrl.startsWith("data:image/")) {
+            throw new Error("The latest gallery item did not contain valid image data.");
         }
+        return await resizeImageDataUrl(dataUrl, THUMBNAIL_STORAGE_MAX_SIZE);
     }
 
     function promptThumbnailSeedChoice(anchorEl, hasLatest) {
@@ -297,6 +376,13 @@
             // Kept simple for compatibility; console + title flash.
         }
         console.log(`[Prompt Snippets] ${msg}`);
+    }
+
+    function errorMessage(err) {
+        if (err && typeof err === "object" && typeof err.message === "string" && err.message) {
+            return err.message;
+        }
+        return String(err);
     }
 
     function getDensityMode() {
@@ -652,6 +738,48 @@
         };
     }
 
+    function validateNewSnippet(name, content, origin, groupId) {
+        if (!String(name || "").trim()) return "Snippet name cannot be empty.";
+        if (!String(content || "").length) return "Snippet content cannot be empty.";
+        if (!["positive", "negative", "both"].includes(origin)) {
+            return `Unsupported prompt type: ${origin || "(missing)"}.`;
+        }
+        if (!groupId) return "";
+
+        const group = loadGroups().find((item) => item.id === groupId);
+        if (!group) return "The selected group no longer exists. Reopen the save dialog and choose another group.";
+        if (!isGroupVisibleFor(group, origin)) {
+            return `The selected group "${group.name}" is not available for ${origin} prompts.`;
+        }
+        return "";
+    }
+
+    async function saveNewSnippet(snippet) {
+        const snippets = loadSnippets();
+        snippets.push(snippet);
+
+        try {
+            await saveSnippets(snippets);
+            return { saved: true, thumbnailSkipped: false, reason: "" };
+        } catch (err) {
+            if (!snippet.thumbnail) {
+                snippets.splice(snippets.indexOf(snippet), 1);
+                throw err;
+            }
+
+            const reason = errorMessage(err);
+            snippet.thumbnail = "";
+            try {
+                await saveSnippets(snippets);
+                return { saved: true, thumbnailSkipped: true, reason };
+            } catch (retryErr) {
+                snippets.splice(snippets.indexOf(snippet), 1);
+                const retryReason = errorMessage(retryErr);
+                throw new Error(`Saving failed with the generated image (${reason}) and without it (${retryReason}).`);
+            }
+        }
+    }
+
     async function saveFromTextarea(textarea, origin, fullPrompt = false, anchorEl = null) {
         const selected = textarea.value.slice(textarea.selectionStart || 0, textarea.selectionEnd || 0);
         const raw = fullPrompt ? textarea.value : selected || textarea.value;
@@ -664,8 +792,23 @@
         const defaultName = slugPreview(content);
         showInlineSnippetPrompt(anchorEl, defaultName, origin, (name, groupId) => {
             void (async () => {
+                const normalizedName = (name || "").trim() || defaultName;
+                const validationError = validateNewSnippet(normalizedName, content, origin, groupId);
+                if (validationError) {
+                    throw new Error(validationError);
+                }
+
                 const seedMode = getThumbnailSeedMode();
-                const latestThumbnail = seedMode === "never" ? "" : await getLatestGalleryThumbnailDataUrl();
+                let latestThumbnail = "";
+                let generatedImageWarning = "";
+                if (seedMode !== "never") {
+                    try {
+                        latestThumbnail = await getLatestGalleryThumbnailDataUrl();
+                    } catch (err) {
+                        generatedImageWarning = errorMessage(err);
+                        console.warn("Prompt snippets: could not use latest generation as thumbnail", err);
+                    }
+                }
                 let thumbnail = "";
 
                 if (seedMode === "always") {
@@ -684,18 +827,29 @@
                     }
                 }
 
-                const snippets = loadSnippets();
-                const snippet = buildSnippet((name || "").trim() || defaultName, content, origin, groupId);
+                const snippet = buildSnippet(normalizedName, content, origin, groupId);
                 if (thumbnail) {
                     snippet.thumbnail = thumbnail;
                 }
-                snippets.push(snippet);
-                saveSnippets(snippets);
+                const result = await saveNewSnippet(snippet);
                 notify("Snippet saved");
-                showInlineNotice(anchorEl, thumbnail ? "Snippet saved with thumbnail." : "Snippet saved.");
+                if (result.thumbnailSkipped) {
+                    showInlineNotice(
+                        anchorEl,
+                        `Snippet saved without the generated image because attaching it failed: ${result.reason}`
+                    );
+                } else if (generatedImageWarning && !thumbnail) {
+                    showInlineNotice(
+                        anchorEl,
+                        `Snippet saved without the generated image because loading it failed: ${generatedImageWarning}`
+                    );
+                } else {
+                    showInlineNotice(anchorEl, thumbnail ? "Snippet saved with thumbnail." : "Snippet saved.");
+                }
             })().catch((err) => {
                 console.warn("Prompt snippets: save failed", err);
-                showInlineNotice(anchorEl, "Snippet save failed.");
+                const reason = errorMessage(err);
+                showInlineNotice(anchorEl, `Snippet save failed: ${reason}`);
             });
         });
     }
@@ -2474,15 +2628,22 @@ body.fps-density-compact .${MENU_CLASS} .fps-list {
     }
 
     uiLoadedHook(() => {
-        runSetup();
-
-        const observer = new MutationObserver(() => {
+        void initializeLibrary().then(() => {
             runSetup();
-        });
 
-        observer.observe(document.body, {
-            childList: true,
-            subtree: true,
+            const observer = new MutationObserver(() => {
+                runSetup();
+            });
+
+            observer.observe(document.body, {
+                childList: true,
+                subtree: true,
+            });
+        }).catch((err) => {
+            ensureStyles();
+            const reason = errorMessage(err);
+            console.error("Prompt snippets: initialization failed", err);
+            showInlineNotice(null, `Could not load the snippet JSON file: ${reason}`);
         });
     });
 })();

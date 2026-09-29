@@ -2,6 +2,9 @@ import modules.scripts as scripts
 import modules.shared as shared
 import modules.script_callbacks as script_callbacks
 import gradio as gr
+from fastapi import FastAPI, HTTPException, Request
+
+from lib_prompt_snippets import store as prompt_snippet_store
 
 
 class PromptSnippetManager(scripts.Script):
@@ -57,4 +60,26 @@ def on_ui_settings():
     )
 
 
+def add_api_endpoints(_: gr.Blocks, app: FastAPI):
+    @app.get("/sd-neo-prompt-snippets/v1/library")
+    async def get_library():
+        try:
+            library, exists = prompt_snippet_store.load_library()
+            return {"exists": exists, "library": library}
+        except prompt_snippet_store.LibraryError as exc:
+            raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    @app.put("/sd-neo-prompt-snippets/v1/library")
+    async def put_library(request: Request):
+        try:
+            payload = await request.json()
+            document = prompt_snippet_store.save_library(payload)
+            return {"success": True, "library": document}
+        except prompt_snippet_store.LibraryError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"Invalid JSON: {exc}") from exc
+
+
 script_callbacks.on_ui_settings(on_ui_settings)
+script_callbacks.on_app_started(add_api_endpoints)
